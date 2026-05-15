@@ -210,6 +210,10 @@ class AnyProviderConfig:
         return cls(
             base_url=_get_base_url(ai_config),
             api_key=key,
+            # Pass through `[ai.anthropic.extra_headers]` (and per-request
+            # overrides injected via `AiConfig.copy_with_overrides`) so they
+            # land on the outbound Anthropic SDK request as default_headers.
+            extra_headers=ai_config.get("extra_headers", None),
             tools=_get_tools(config.get("mode", "manual")),
         )
 

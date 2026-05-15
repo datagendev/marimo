@@ -1,7 +1,7 @@
 # Copyright 2026 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from starlette.authentication import requires
 from starlette.exceptions import HTTPException
@@ -22,6 +22,7 @@ from marimo._server.ai.config import (
     get_edit_model,
     get_max_tokens,
 )
+from marimo._server.ai.ids import AiModelId
 from marimo._server.ai.mcp import MCPServerStatus, get_mcp_client
 from marimo._server.ai.prompts import (
     FIM_MIDDLE_TAG,
@@ -212,7 +213,7 @@ async def ai_chat(
                     $ref: "#/components/schemas/ChatRequest"
     """
     app_state = AppState(request)
-    app_state.require_current_session()
+    session = app_state.require_current_session()
     session_id = app_state.require_current_session_id()
     accept = request.headers.get("accept", SSE_CONTENT_TYPE)
     config = app_state.app_config_manager.get_config(hide_secrets=False)
@@ -221,6 +222,27 @@ async def ai_chat(
     )
     ai_config = get_ai_config(config)
     custom_rules = ai_config.get("rules", None)
+
+    # Tag the outbound provider request with marimo session metadata so
+    # reverse proxies can deterministically resolve which notebook the
+    # chat call belongs to (DataGen/Wasp proxy, etc). We mutate a per-
+    # request copy of the provider sub-config; the user's persisted
+    # extra_headers still win on key collision.
+    session_path = session.app_file_manager.path
+    _provider_id = AiModelId.from_model(
+        body.model or get_chat_model(ai_config)
+    ).provider
+    _provider_cfg = dict(ai_config.get(_provider_id, {}) or {})
+    _injected_headers: dict[str, str] = {
+        "X-Marimo-Session-Id": str(session_id),
+    }
+    if session_path:
+        _injected_headers["X-Marimo-Session-File"] = session_path
+    _provider_cfg["extra_headers"] = {
+        **_injected_headers,
+        **(_provider_cfg.get("extra_headers") or {}),
+    }
+    ai_config = cast(AiConfig, {**ai_config, _provider_id: _provider_cfg})
 
     # Get the system prompt
     system_prompt = get_chat_system_prompt(

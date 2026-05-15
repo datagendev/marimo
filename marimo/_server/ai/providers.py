@@ -723,6 +723,23 @@ class AnthropicProvider(PydanticProvider["PydanticAnthropic"]):
             AnthropicProvider as PydanticAnthropic,
         )
 
+        # When extra_headers or a base_url override are present, build the
+        # AsyncAnthropic client ourselves so the headers ride along on every
+        # outbound /v1/messages request. Used by reverse-proxy deployments
+        # that need per-request routing metadata (e.g. session id).
+        extra_headers = config.extra_headers or None
+        if extra_headers or config.base_url:
+            from anthropic import AsyncAnthropic
+
+            client_kwargs: dict[str, Any] = {"api_key": config.api_key}
+            if config.base_url:
+                client_kwargs["base_url"] = config.base_url
+            if extra_headers:
+                client_kwargs["default_headers"] = extra_headers
+            return PydanticAnthropic(
+                anthropic_client=AsyncAnthropic(**client_kwargs)
+            )
+
         return PydanticAnthropic(api_key=config.api_key)
 
     def create_model(self, max_tokens: int) -> Model:
