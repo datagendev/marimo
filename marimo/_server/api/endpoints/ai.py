@@ -214,7 +214,18 @@ async def ai_chat(
     """
     app_state = AppState(request)
     session = app_state.require_current_session()
-    session_id = app_state.require_current_session_id()
+    # Resolve the canonical session id from the live session object
+    # rather than the inbound Marimo-Session-Id header. The chat panel
+    # binds its session id at first paint and keeps emitting it; when
+    # the reactive kernel WebSocket reconnects (e.g. after hibernation),
+    # edit-mode resume rewrites the session id in place but the chat
+    # client is never notified. Reverse-looking up the id keeps the
+    # value we forward in headers and embed in the system prompt
+    # aligned with /api/sessions.
+    canonical_session_id = app_state.session_manager.get_current_session_id(
+        session
+    )
+    session_id = canonical_session_id or app_state.require_current_session_id()
     accept = request.headers.get("accept", SSE_CONTENT_TYPE)
     config = app_state.app_config_manager.get_config(hide_secrets=False)
     body = await parse_request(

@@ -184,6 +184,50 @@ def test_maybe_resume_session_for_existing_file(
     assert resumed_session is mock_session
 
 
+def test_get_current_session_id_tracks_resume_rewrite(
+    session_manager: SessionManager,
+    mock_session: Session,
+    temp_marimo_file: str,
+) -> None:
+    """After an edit-mode resume rewrites the session id, callers
+    holding the old id must be able to resolve the new id via the
+    Session object.
+
+    This protects ``ai_chat`` (and any other endpoint that wants to
+    forward a "current" session id to downstream services) from
+    leaking a stale id when the reactive WebSocket reconnects.
+    """
+    mock_session.connection_state.return_value = ConnectionState.ORPHANED
+    mock_session.app_file_manager = AppFileManager(filename=temp_marimo_file)
+    old_id = SessionId("old-session-id")
+    new_id = SessionId("new-session-id")
+    add_session(session_manager, old_id, mock_session)
+
+    # Sanity: pre-resume, the canonical id is the old id.
+    assert session_manager.get_current_session_id(mock_session) == old_id
+
+    # Simulate the reactive WebSocket reconnecting with a fresh id;
+    # edit-mode resume rewrites the dict key in place.
+    resumed = session_manager.maybe_resume_session(new_id, temp_marimo_file)
+    assert resumed is mock_session
+
+    # The reverse lookup must now return the new id, even though a
+    # caller (e.g. the AI chat panel) may still be holding the old id.
+    assert session_manager.get_current_session_id(mock_session) == new_id
+    # And the new id must be the one stored under in the repo.
+    assert new_id in session_manager.sessions
+    assert old_id not in session_manager.sessions
+
+
+def test_get_current_session_id_returns_none_for_unknown_session(
+    session_manager: SessionManager,
+    mock_session: Session,
+) -> None:
+    """A session that was never added to the repository has no
+    canonical id; callers fall back to whatever id they were given."""
+    assert session_manager.get_current_session_id(mock_session) is None
+
+
 def test_close_session(
     session_manager: SessionManager, mock_session: Session
 ) -> None:

@@ -320,6 +320,19 @@ class SessionManager:
         """Get a session by file key."""
         return self._repository.get_by_file_key(file_key)
 
+    def get_current_session_id(self, session: Session) -> SessionId | None:
+        """Return the current canonical session id for a session object.
+
+        After an edit-mode WebSocket reconnect, the repository rewrites a
+        session's id in place (see ``maybe_resume_session``) while a
+        long-lived HTTP client (e.g. the AI chat panel) may still hold
+        the previous id. This reverse lookup returns the id under which
+        the session is currently registered, so callers can resolve the
+        live id from the ``Session`` object rather than trusting a
+        request header.
+        """
+        return self._repository.get_session_id(session)
+
     def maybe_resume_session(
         self, new_session_id: SessionId, file_key: MarimoFileKey
     ) -> Session | None:
