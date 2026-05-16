@@ -142,6 +142,18 @@ class SkewProtectionMiddleware:
             "/ws"
         ):
             return await self.app(scope, receive, send)
+        # DATAGEN-FORK: skip skew protection for the headless additive
+        # endpoints. These are designed for programmatic HTTP drivers
+        # (marimo-pair, datagen-marimo, agent SDK skills) that don't go
+        # through the marimo SPA frontend and so never receive the
+        # Marimo-Server-Token header. Auth is handled separately at the
+        # Wasp layer via X-Api-Key against MarimoSession.notebookApiKey.
+        _path = request.url.path
+        if (
+            _path.startswith("/api/sessions/open")
+            or _path.startswith("/api/chat_history/")
+        ):
+            return await self.app(scope, receive, send)
 
         expected = state.session_manager.skew_protection_token
         server_token = request.headers.get(self.HEADER_NAME)
