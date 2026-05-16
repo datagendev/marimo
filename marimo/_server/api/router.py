@@ -100,16 +100,18 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
         packages_router, prefix="/api/packages", name="packages"
     )
     app_router.include_router(lsp_router, prefix="/api/lsp", name="lsp")
-    app_router.include_router(health_router, name="health")
-    app_router.include_router(ws_router, name="ws")
 
     # --- DATAGEN-FORK: chat-history persistence ---
-    # MUST be registered BEFORE assets_router. assets is a catch-all
-    # static-file serve that matches any unrecognized path and returns
-    # the SPA index.html (or a 405 Method Not Allowed on POST). If our
-    # routes were registered after assets, every /api/chat_history/*
-    # request would be black-holed by the static handler. Order matters
-    # for Starlette route resolution.
+    # MUST be registered BEFORE health_router, ws_router, and
+    # assets_router — all three of those are mounted with empty
+    # prefix (""), which Starlette treats as a wildcard prefix that
+    # matches every path. Once Starlette resolves a Mount, it does NOT
+    # fall through to the next Mount even if the inner router 404s;
+    # mount-match wins, inner-router 404s, request fails.
+    #
+    # Every other /api/* router in this file is registered ABOVE the
+    # empty-prefix routers for the same reason — we slot in here at
+    # the end of the "real prefix" block.
     app_router.include_router(
         chat_history_router,
         prefix="/api/chat_history",
@@ -117,12 +119,15 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
     )
 
     # --- DATAGEN-FORK: headless session-open ---
-    # Same ordering rule as chat_history above: must be before assets.
+    # Same ordering rule as chat_history above.
     app_router.include_router(
         sessions_open_router,
         prefix="/api/sessions",
         name="sessions_open",
     )
+
+    app_router.include_router(health_router, name="health")
+    app_router.include_router(ws_router, name="ws")
 
     # assets is the catch-all SPA static handler — keep last so any
     # request that didn't match a real API route falls through to the
