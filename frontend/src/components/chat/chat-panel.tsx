@@ -27,6 +27,7 @@ import {
   SelectLabel,
   SelectTrigger,
 } from "@/components/ui/select";
+import { useChatPersistence } from "@/core/ai/chat-persistence";
 import { replaceMessagesInChat } from "@/core/ai/chat-utils";
 import { useModelChange } from "@/core/ai/config";
 import { AiModelId } from "@/core/ai/ids/ids";
@@ -424,6 +425,9 @@ const ChatPanel = () => {
 };
 
 const ChatPanelBody = () => {
+  // Mirror chat history to <notebook_dir>/.session/ so it follows the
+  // project across refreshes instead of dying with the browser tab.
+  useChatPersistence();
   const setChatState = useSetAtom(chatStateAtom);
   const [activeChat, setActiveChat] = useAtom(activeChatAtom);
   const [input, setInput] = useState("");

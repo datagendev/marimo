@@ -25,6 +25,9 @@ from marimo._server.api.endpoints.health import router as health_router
 from marimo._server.api.endpoints.home import router as home_router
 from marimo._server.api.endpoints.login import router as login_router
 from marimo._server.api.endpoints.lsp import router as lsp_router
+from marimo._server.api.endpoints.managed_agent import (
+    router as managed_agent_router,
+)
 from marimo._server.api.endpoints.packages import router as packages_router
 from marimo._server.api.endpoints.secrets import router as secrets_router
 from marimo._server.api.endpoints.sql import router as sql_router
@@ -71,6 +74,11 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
         storage_router, prefix="/api/storage", name="storage"
     )
     app_router.include_router(ai_router, prefix="/api/ai", name="ai")
+    app_router.include_router(
+        managed_agent_router,
+        prefix="/api/managed_agent",
+        name="managed_agent",
+    )
     app_router.include_router(home_router, prefix="/api/home", name="home")
     app_router.include_router(login_router, prefix="/auth", name="auth")
     app_router.include_router(
