@@ -1,0 +1,149 @@
+# Copyright 2026 Marimo. All rights reserved.
+"""Headless session-create endpoint.
+
+DATAGEN-FORK addition. Creates a marimo kernel session bound to a file
+path WITHOUT requiring a WebSocket consumer attachment. This is the
+session-bootstrap counterpart for programmatic HTTP-only drivers
+(marimo-pair scripts, datagen-marimo, agent SDK skills) that need a
+session to target via `/api/kernel/execute` but never connect a
+browser.
+
+Without this endpoint, headless callers see an empty
+`GET /api/sessions` response — marimo's normal session-creation path is
+the WebSocket handshake at `/ws`, which only the browser frontend
+performs.
+
+The route is mounted at `POST /api/sessions/open` (see router.py).
+Self-contained: removing the include_router call in router.py is a
+clean revert.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import TYPE_CHECKING, Any
+
+from starlette.authentication import requires
+from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse
+
+from marimo import _loggers
+from marimo._server.api.deps import AppState
+from marimo._server.router import APIRouter
+from marimo._session.consumer import SessionConsumer
+from marimo._session.model import ConnectionState
+from marimo._types.ids import ConsumerId
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
+
+    from marimo._messaging.types import KernelMessage
+
+LOGGER = _loggers.marimo_logger()
+
+router = APIRouter()
+
+
+class _HeadlessSessionConsumer(SessionConsumer):
+    """No-op consumer for headless session creation.
+
+    Satisfies the SessionConsumer contract without holding an actual
+    network connection. Drops kernel notifications on the floor —
+    headless callers read state via separate HTTP polls
+    (`/api/kernel/execute`, `/api/sessions`), not via push.
+    Reports ConnectionState.OPEN so marimo's session GC doesn't tear
+    the session down for being orphaned.
+    """
+
+    def __init__(self, consumer_id: str) -> None:
+        self._consumer_id = ConsumerId(consumer_id)
+
+    @property
+    def consumer_id(self) -> ConsumerId:
+        return self._consumer_id
+
+    def notify(self, notification: KernelMessage) -> None:
+        del notification
+
+    def connection_state(self) -> ConnectionState:
+        return ConnectionState.OPEN
+
+
+@router.post("/open")
+@requires("edit")
+async def open_session(*, request: Request) -> JSONResponse:
+    """Create (or attach to) a marimo kernel session for a file path.
+
+    Body: ``{"filePath": "/absolute/path/inside/sandbox.py"}``
+
+    Response:
+        ``{"sessionId": "s_xxxxx",
+           "filename":  "basename.py" | null,
+           "path":      "/absolute/...",
+           "wasExisting": bool}``
+
+    Idempotent: if any session already serves the requested file path,
+    returns its sessionId; otherwise creates a new one with a no-op
+    consumer and returns the freshly-minted sessionId.
+    """
+    state = AppState(request)
+    body: Any
+    try:
+        body = await request.json()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {e}")
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="body must be a JSON object"
+        )
+    file_path = body.get("filePath")
+    if not isinstance(file_path, str) or not file_path:
+        raise HTTPException(
+            status_code=400, detail="body.filePath (non-empty string) required"
+        )
+
+    sm = state.session_manager
+
+    # Idempotency: if any existing session already serves this file
+    # path, return it. Mirrors how the WebSocket handshake re-uses
+    # sessions when the same file is reopened.
+    for sid, session in sm.sessions.items():
+        if session.app_file_manager.path == file_path:
+            return JSONResponse(
+                {
+                    "sessionId": sid,
+                    "filename": session.app_file_manager.filename,
+                    "path": session.app_file_manager.path,
+                    "wasExisting": True,
+                }
+            )
+
+    # Generate a fresh session_id matching marimo's `s_xxxxx` convention.
+    session_id = f"s_{uuid.uuid4().hex[:8]}"
+    consumer = _HeadlessSessionConsumer(consumer_id=session_id)
+
+    try:
+        session = sm.create_session(
+            session_id=session_id,
+            session_consumer=consumer,
+            query_params={},
+            file_key=file_path,
+            auto_instantiate=True,
+        )
+    except Exception as e:
+        LOGGER.exception(
+            "sessions_open: create_session failed for %s", file_path
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to create session for {file_path}: {e}",
+        )
+
+    return JSONResponse(
+        {
+            "sessionId": session_id,
+            "filename": session.app_file_manager.filename,
+            "path": session.app_file_manager.path,
+            "wasExisting": False,
+        }
+    )

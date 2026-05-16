@@ -41,6 +41,15 @@ from marimo._server.api.endpoints.chat_history import (
     router as chat_history_router,
 )
 
+# --- DATAGEN-FORK: headless session-open route (datagendev/marimo) ---
+# Lets HTTP-only drivers (marimo-pair, datagen-marimo) bootstrap a
+# kernel session for a file path without a WebSocket consumer. Mounted
+# at /api/sessions/open. Removing this import + the include_router
+# call below is a clean revert.
+from marimo._server.api.endpoints.sessions_open import (
+    router as sessions_open_router,
+)
+
 if TYPE_CHECKING:
     from starlette.routing import BaseRoute
 
@@ -102,6 +111,13 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
         chat_history_router,
         prefix="/api/chat_history",
         name="chat_history",
+    )
+
+    # --- DATAGEN-FORK: headless session-open (mounted last on purpose) ---
+    app_router.include_router(
+        sessions_open_router,
+        prefix="/api/sessions",
+        name="sessions_open",
     )
 
     return app_router.routes
