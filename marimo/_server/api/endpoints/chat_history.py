@@ -123,7 +123,13 @@ async def upsert_chat(*, request: Request) -> Response:
 
 @router.delete("/chats/{chat_id}")
 @requires("edit")
-async def remove_chat(*, request: Request) -> Response:
+async def remove_chat(request: Request) -> Response:
+    # NB: marimo's `APIRouter.delete` registers the handler directly,
+    # without the keyword-binding wrapper that `APIRouter.post` uses
+    # (router.py:46 vs router.py:114). starlette therefore calls this
+    # endpoint with `request` as a positional argument, so the
+    # signature must be positional-friendly. Sister handlers in this
+    # file that use `*, request:` are fine because they're all POST.
     state = AppState(request)
     state.require_current_session()
     chat_id = request.path_params["chat_id"]

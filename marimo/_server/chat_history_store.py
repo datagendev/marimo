@@ -18,6 +18,7 @@ fields we look at are ``id``, ``title``, ``updatedAt``, and
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -72,7 +73,17 @@ def chat_path(notebook_path: str | None, chat_id: str) -> Path | None:
 
 def _atomic_write_json(target: Path, data: Any) -> None:
     """Write JSON via temp file + ``os.replace`` so a crash mid-write
-    can't leave a half-written file in the user's project."""
+    can't leave a half-written file in the user's project.
+
+    DATAGEN-FORK note: when the target lives on a FUSE filesystem that
+    does not implement ``rename`` (notably ``mountpoint-s3``, which
+    returns ``ENOSYS`` because S3 has no rename primitive), we fall back
+    to a direct write to the final path. This preserves the only
+    atomicity property that matters on S3 — ``PUT`` is atomic at the
+    object level, so the final object either appears whole or not at
+    all. On POSIX-backed mounts the original temp+replace path runs
+    unchanged.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         prefix=".tmp-",
@@ -82,7 +93,21 @@ def _atomic_write_json(target: Path, data: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, target)
+        try:
+            os.replace(tmp_path, target)
+        except OSError as exc:
+            if exc.errno != errno.ENOSYS:
+                raise
+            # FUSE-S3 (or another mount without ``rename``) -- write the
+            # bytes straight to the final path. The PUT itself is atomic
+            # on S3, so the readers' "either whole or absent" invariant
+            # still holds. The tmp file becomes a leftover; clean it up.
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except Exception:
         try:
             os.unlink(tmp_path)
