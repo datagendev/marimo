@@ -25,9 +25,6 @@ from marimo._server.api.endpoints.health import router as health_router
 from marimo._server.api.endpoints.home import router as home_router
 from marimo._server.api.endpoints.login import router as login_router
 from marimo._server.api.endpoints.lsp import router as lsp_router
-from marimo._server.api.endpoints.managed_agent import (
-    router as managed_agent_router,
-)
 from marimo._server.api.endpoints.packages import router as packages_router
 from marimo._server.api.endpoints.secrets import router as secrets_router
 from marimo._server.api.endpoints.sql import router as sql_router
@@ -35,6 +32,14 @@ from marimo._server.api.endpoints.storage import router as storage_router
 from marimo._server.api.endpoints.terminal import router as terminal_router
 from marimo._server.api.endpoints.ws_endpoint import router as ws_router
 from marimo._server.router import APIRouter
+
+# --- DATAGEN-FORK: chat-history persistence routes (datagendev/marimo) ---
+# Self-contained additive endpoint mounted last to minimize upstream merge
+# conflicts. Removing this import + the include_router call below is a
+# clean revert to upstream-vanilla router behavior.
+from marimo._server.api.endpoints.chat_history import (
+    router as chat_history_router,
+)
 
 if TYPE_CHECKING:
     from starlette.routing import BaseRoute
@@ -74,11 +79,6 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
         storage_router, prefix="/api/storage", name="storage"
     )
     app_router.include_router(ai_router, prefix="/api/ai", name="ai")
-    app_router.include_router(
-        managed_agent_router,
-        prefix="/api/managed_agent",
-        name="managed_agent",
-    )
     app_router.include_router(home_router, prefix="/api/home", name="home")
     app_router.include_router(login_router, prefix="/auth", name="auth")
     app_router.include_router(
@@ -94,5 +94,14 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
     app_router.include_router(health_router, name="health")
     app_router.include_router(ws_router, name="ws")
     app_router.include_router(assets_router, name="assets")
+
+    # --- DATAGEN-FORK: chat-history persistence (mounted last on purpose) ---
+    # Kept at end of include block so upstream router insertions land
+    # above us; three-way merges stay trivial.
+    app_router.include_router(
+        chat_history_router,
+        prefix="/api/chat_history",
+        name="chat_history",
+    )
 
     return app_router.routes

@@ -6,9 +6,12 @@ list survives browser refreshes, sandbox restarts, and machine moves —
 chats follow the notebook, not the browser's localStorage. Storage layout
 is owned by ``marimo._server.chat_history_store``.
 
-URL prefix is ``/api/managed_agent`` for historical reasons (the chat
-panel's frontend client hard-codes that path). The router lives here
-even though it no longer hosts managed-agent-specific RPC.
+URL prefix: ``/api/chat_history`` (see router.py for the mount point).
+Frontend client: ``frontend/src/core/ai/chat-persistence.ts``.
+
+DATAGEN-FORK note: this whole module is additive (no upstream marimo
+file depends on it). Removing the include_router call in router.py is
+a clean revert to upstream-vanilla behavior.
 """
 
 from __future__ import annotations

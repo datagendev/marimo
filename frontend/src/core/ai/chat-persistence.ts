@@ -31,7 +31,11 @@ import { Logger } from "@/utils/Logger";
 import { getRuntimeManager } from "@/core/runtime/config";
 import { type Chat, type ChatId, chatStateAtom } from "./state";
 
-const ROUTE = "/api/managed_agent/chats";
+// Mounted by the DataGen fork at marimo/_server/api/endpoints/chat_history.py.
+// The whole module is additive — if the backend route is absent (vanilla
+// upstream marimo), every fetch below soft-fails through Logger.warn and
+// the chat panel falls back to localStorage-only state.
+const ROUTE = "/api/chat_history/chats";
 const PER_CHAT_DEBOUNCE_MS = 500;
 const ACTIVE_DEBOUNCE_MS = 200;
 

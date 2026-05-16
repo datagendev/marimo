@@ -27,6 +27,7 @@ import {
   SelectLabel,
   SelectTrigger,
 } from "@/components/ui/select";
+// DATAGEN-FORK: chat-history persistence hook (removable single-line)
 import { useChatPersistence } from "@/core/ai/chat-persistence";
 import { replaceMessagesInChat } from "@/core/ai/chat-utils";
 import { useModelChange } from "@/core/ai/config";
@@ -425,8 +426,10 @@ const ChatPanel = () => {
 };
 
 const ChatPanelBody = () => {
-  // Mirror chat history to <notebook_dir>/.session/ so it follows the
-  // project across refreshes instead of dying with the browser tab.
+  // DATAGEN-FORK: mirror chat history to <notebook_dir>/.session/ so it
+  // follows the project across refreshes instead of dying with the browser
+  // tab. Backend at /api/chat_history is additive in this fork; the hook
+  // soft-degrades (Logger.warn, no throw) when the route returns 404.
   useChatPersistence();
   const setChatState = useSetAtom(chatStateAtom);
   const [activeChat, setActiveChat] = useAtom(activeChatAtom);
