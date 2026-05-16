@@ -102,22 +102,31 @@ def build_routes(base_url: str = "") -> list[BaseRoute]:
     app_router.include_router(lsp_router, prefix="/api/lsp", name="lsp")
     app_router.include_router(health_router, name="health")
     app_router.include_router(ws_router, name="ws")
-    app_router.include_router(assets_router, name="assets")
 
-    # --- DATAGEN-FORK: chat-history persistence (mounted last on purpose) ---
-    # Kept at end of include block so upstream router insertions land
-    # above us; three-way merges stay trivial.
+    # --- DATAGEN-FORK: chat-history persistence ---
+    # MUST be registered BEFORE assets_router. assets is a catch-all
+    # static-file serve that matches any unrecognized path and returns
+    # the SPA index.html (or a 405 Method Not Allowed on POST). If our
+    # routes were registered after assets, every /api/chat_history/*
+    # request would be black-holed by the static handler. Order matters
+    # for Starlette route resolution.
     app_router.include_router(
         chat_history_router,
         prefix="/api/chat_history",
         name="chat_history",
     )
 
-    # --- DATAGEN-FORK: headless session-open (mounted last on purpose) ---
+    # --- DATAGEN-FORK: headless session-open ---
+    # Same ordering rule as chat_history above: must be before assets.
     app_router.include_router(
         sessions_open_router,
         prefix="/api/sessions",
         name="sessions_open",
     )
+
+    # assets is the catch-all SPA static handler — keep last so any
+    # request that didn't match a real API route falls through to the
+    # frontend bundle.
+    app_router.include_router(assets_router, name="assets")
 
     return app_router.routes
