@@ -159,22 +159,35 @@ export function useChatPersistence(): void {
       const indexChats = idx.chats ?? [];
       if (indexChats.length === 0 && !idx.activeChatId) return;
 
+      // Echo-suppression: pre-claim every stub we're about to insert
+      // into `lastPushedSnapshot` so the writeback subscriber treats
+      // the index hydration as a no-op. See the longer comment in
+      // `ensureLoaded` below for the full rationale.
+      //
+      // The subscriber already has a `if-stub-then-skip` early-exit at
+      // the bottom of this file, which currently catches index
+      // hydration too (stubs have `messages: []`). We belt-and-suspend
+      // here so the suppression survives a future refactor that
+      // changes what a "stub" looks like.
+      const cur = store.get(chatStateAtom);
+      const pendingStubs = new Map<ChatId, Chat>();
+      for (const entry of indexChats) {
+        const localChat = cur.chats.get(entry.id);
+        if (
+          !localChat ||
+          (entry.updatedAt ?? 0) > (localChat.updatedAt ?? 0)
+        ) {
+          const stub = indexEntryToStubChat(entry);
+          pendingStubs.set(entry.id, stub);
+          lastPushedSnapshot.current.set(entry.id, stub);
+        } else {
+          loadedFullBodies.current.add(entry.id);
+        }
+      }
       store.set(chatStateAtom, (prev) => {
         const merged = new Map(prev.chats);
-        for (const entry of indexChats) {
-          const localChat = merged.get(entry.id);
-          // Newer-wins by updatedAt; if disk is newer, replace with a
-          // stub. The full body will be fetched if the user opens it.
-          if (
-            !localChat ||
-            (entry.updatedAt ?? 0) > (localChat.updatedAt ?? 0)
-          ) {
-            merged.set(entry.id, indexEntryToStubChat(entry));
-          } else {
-            // Local copy is at least as fresh — keep it. Mark it as
-            // already loaded so we don't re-fetch from disk.
-            loadedFullBodies.current.add(entry.id);
-          }
+        for (const [id, stub] of pendingStubs) {
+          merged.set(id, stub);
         }
         return {
           ...prev,
@@ -206,19 +219,50 @@ export function useChatPersistence(): void {
         loadedFullBodies.current.add(chatId); // don't retry forever
         return;
       }
-      store.set(chatStateAtom, (prev) => {
-        const merged = new Map(prev.chats);
-        const local = merged.get(chatId);
-        // Prefer whichever side has more messages; typical case: local
-        // is empty stub, disk has the body.
-        if (
-          !local ||
-          (full.messages?.length ?? 0) >= (local.messages?.length ?? 0)
-        ) {
-          merged.set(chatId, { ...local, ...full });
-        }
-        return { ...prev, chats: merged };
-      });
+      // Compute the merged chat object up front so we can:
+      //  (1) decide whether to mutate the atom at all, and
+      //  (2) ECHO-SUPPRESS the writeback subscriber.
+      //
+      // Why echo-suppress:
+      // The single jotai subscriber further down (`store.sub` in the
+      // write-back effect) fires on every atom mutation and queues a
+      // debounced POST /chats/<id> for any chat whose object reference
+      // changes. That guard skips changes by comparing to
+      // `lastPushedSnapshot.current` -- if a chat's ref matches the
+      // last pushed snapshot, it's a no-op write and we skip.
+      //
+      // Without this fix:
+      //   GET /chats/<id>  ->  atom.set(...new ref...)  ->  subscriber
+      //   sees a "change"  ->  debounced POST /chats/<id> sends the
+      //   exact bytes we just fetched BACK to the server. Pure waste:
+      //   one round-trip + one S3 PUT per hydration, multiplied by the
+      //   number of chats touched on AI-panel open.
+      //
+      // With this fix: we register the new ref into the snapshot map
+      // BEFORE the atom mutation. When the subscriber runs (sync, same
+      // jotai tick), `prev === chat` is true and the writeback is
+      // skipped. The bytes round-trip ZERO times for the hydration
+      // path. Subsequent user edits still trigger writebacks normally
+      // because those edits produce a new ref that doesn't match the
+      // snapshot we registered here.
+      const cur = store.get(chatStateAtom);
+      const local = cur.chats.get(chatId);
+      const shouldMerge =
+        !local ||
+        (full.messages?.length ?? 0) >= (local.messages?.length ?? 0);
+      if (shouldMerge) {
+        const newChat: Chat = { ...local, ...full };
+        // Echo-suppression: pre-claim the snapshot so the writeback
+        // subscriber's `prev === chat` ref-equality check skips this
+        // hydration. MUST happen before `store.set` so the subscriber
+        // (which runs synchronously inside set) sees the claim.
+        lastPushedSnapshot.current.set(chatId, newChat);
+        store.set(chatStateAtom, (prev) => {
+          const merged = new Map(prev.chats);
+          merged.set(chatId, newChat);
+          return { ...prev, chats: merged };
+        });
+      }
       loadedFullBodies.current.add(chatId);
     };
 
