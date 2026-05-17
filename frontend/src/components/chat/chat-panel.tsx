@@ -466,6 +466,15 @@ const ChatPanelBody = () => {
     stop,
     addToolOutput,
     id: chatId,
+    // DATAGEN-FORK: used by the click-to-load sync effect below. The AI
+    // SDK's `messages` option is a one-shot seed consulted only when
+    // useChat first sees a new `id`; subsequent prop updates are
+    // ignored. That collides with our `useChatPersistence` hook which
+    // fetches the chat body ASYNC after `activeChatId` flips. Without
+    // `setMessages`, clicking a chat in the history popover that was
+    // not previously in localStorage would leave the panel empty even
+    // though the GET succeeded and the atom got populated.
+    setMessages,
   } = useChat({
     id: activeChatId,
     sendAutomaticallyWhen: ({ messages }) => hasPendingToolCalls(messages),
@@ -526,6 +535,46 @@ const ChatPanelBody = () => {
   });
 
   const isLoading = status === "submitted" || status === "streaming";
+
+  // DATAGEN-FORK: sync the AI SDK's internal message buffer with the
+  // jotai atom when the chat body lands async after the user clicks a
+  // history popover entry. See the long comment on `setMessages` above.
+  //
+  // The race we're solving:
+  //   t0: user clicks "S3 PROOF" in the history popover
+  //   t1: setActiveChat(id) flips activeChatId
+  //   t2: useChat({ id, messages: activeChat?.messages }) initializes
+  //       — but at t2, activeChat is still a stub from the index fetch,
+  //       so messages = [] and useChat creates an empty internal buffer
+  //   t3: useChatPersistence's effect fires GET /chats/<id>
+  //   t4: response lands, atom is merged with activeChat.messages = [m1,m2]
+  //   t5: chat-panel re-renders, but useChat IGNORES the new `messages:`
+  //       prop because it only treats it as initial seed. Panel stays empty.
+  //
+  // This effect closes the gap: when t4 happens, the atom's messages
+  // become non-empty while useChat's internal buffer is still empty —
+  // we call setMessages to hand the body over.
+  //
+  // Guards:
+  //   - skip if no active chat
+  //   - skip if atom hasn't got the body yet (no point overwriting empty with empty)
+  //   - skip if we're currently streaming a turn (don't clobber in-flight chunks)
+  //   - skip if useChat's buffer is already non-empty (means the user is
+  //     mid-conversation; the local buffer is the source of truth until
+  //     onFinish writes it back to the atom)
+  useEffect(() => {
+    if (!activeChat?.id) return;
+    if (!activeChat.messages || activeChat.messages.length === 0) return;
+    if (status === "submitted" || status === "streaming") return;
+    if (messages.length > 0) return;
+    setMessages(activeChat.messages);
+  }, [
+    activeChat?.id,
+    activeChat?.messages,
+    messages.length,
+    setMessages,
+    status,
+  ]);
 
   // Check if we're currently streaming reasoning in the latest message
   const isStreamingReasoning =
