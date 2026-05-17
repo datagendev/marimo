@@ -245,13 +245,12 @@ export function useChatPersistence(): void {
       // path. Subsequent user edits still trigger writebacks normally
       // because those edits produce a new ref that doesn't match the
       // snapshot we registered here.
-      const cur = store.get(chatStateAtom);
-      const local = cur.chats.get(chatId);
+      const localFull = store.get(chatStateAtom).chats.get(chatId);
       const shouldMerge =
-        !local ||
-        (full.messages?.length ?? 0) >= (local.messages?.length ?? 0);
+        !localFull ||
+        (full.messages?.length ?? 0) >= (localFull.messages?.length ?? 0);
       if (shouldMerge) {
-        const newChat: Chat = { ...local, ...full };
+        const newChat: Chat = { ...localFull, ...full };
         // Echo-suppression: pre-claim the snapshot so the writeback
         // subscriber's `prev === chat` ref-equality check skips this
         // hydration. MUST happen before `store.set` so the subscriber
