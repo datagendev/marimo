@@ -24,13 +24,7 @@ from starlette.responses import JSONResponse, Response
 
 from marimo import _loggers
 from marimo._server.api.deps import AppState
-from marimo._server.chat_history_store import (
-    delete_chat,
-    load_chat,
-    load_index,
-    save_chat,
-    set_active_chat_id,
-)
+from marimo._server.chat_history_provider import get_provider
 from marimo._server.router import APIRouter
 
 if TYPE_CHECKING:
@@ -58,12 +52,13 @@ async def list_chats(*, request: Request) -> JSONResponse:
          "chats": [{id, title, createdAt, updatedAt, agentSessionId,
                     messageCount}, ...]}
 
-    Returns an empty index for unsaved notebooks. Auto-migrates a
-    legacy ``chats.json`` if one is present.
+    Backed by the configured provider (file = on-disk; http = DataGen
+    Wasp). Returns an empty index for unsaved notebooks. Auto-migrates
+    a legacy ``chats.json`` if one is present (file provider only).
     """
     state = AppState(request)
     state.require_current_session()
-    return JSONResponse(load_index(_notebook_path(state)))
+    return JSONResponse(get_provider().load_index(_notebook_path(state)))
 
 
 @router.get("/chats/{chat_id}")
@@ -78,7 +73,7 @@ async def get_chat(*, request: Request) -> Response:
     state.require_current_session()
     chat_id = request.path_params["chat_id"]
     try:
-        chat = load_chat(_notebook_path(state), chat_id)
+        chat = get_provider().load_chat(_notebook_path(state), chat_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if chat is None:
@@ -93,7 +88,10 @@ async def upsert_chat(*, request: Request) -> Response:
 
     Body must be a JSON object with at least an ``id`` field that
     matches the URL's ``chat_id``. Drops the write for unsaved
-    notebooks (client keeps a localStorage copy).
+    notebooks (client keeps a localStorage copy). For the HTTP
+    provider, save is a no-op — the DataGen proxy already persisted
+    the JSONL deltas during ``runChatTurn``; the marimo client's
+    POST is effectively a write-through cache miss.
     """
     state = AppState(request)
     state.require_current_session()
@@ -113,7 +111,7 @@ async def upsert_chat(*, request: Request) -> Response:
             detail="body 'id' must match URL chat_id",
         )
     try:
-        saved_to = save_chat(_notebook_path(state), body)
+        saved_to = get_provider().save_chat(_notebook_path(state), body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if saved_to is None:
@@ -134,7 +132,7 @@ async def remove_chat(request: Request) -> Response:
     state.require_current_session()
     chat_id = request.path_params["chat_id"]
     try:
-        delete_chat(_notebook_path(state), chat_id)
+        get_provider().delete_chat(_notebook_path(state), chat_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return Response(status_code=204)
@@ -160,5 +158,5 @@ async def set_active(*, request: Request) -> Response:
         raise HTTPException(
             status_code=400, detail="activeChatId must be a string or null"
         )
-    set_active_chat_id(_notebook_path(state), active)
+    get_provider().set_active_chat_id(_notebook_path(state), active)
     return Response(status_code=204)
