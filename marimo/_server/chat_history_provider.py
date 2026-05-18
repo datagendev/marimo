@@ -204,23 +204,25 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
         """Translate a ``ConversationSessionIndex`` (Wasp wire shape) to
         the marimo popover's chat-index entry shape.
 
-        Wasp shape: id, marimoChatId, title, agentId, agentName,
-        conversationKey, claudeSessionId, notebookPath, rootExecutionId,
-        lastTurnAt, turnCount.
+        Wasp shape: id, title, agentId, agentName, conversationKey,
+        claudeSessionId, notebookPath, rootExecutionId, lastTurnAt,
+        turnCount.
 
         Marimo shape: id, title, createdAt, updatedAt, agentSessionId,
         messageCount.
 
         Mapping choices:
-          * ``id`` = marimoChatId when present (so marimo sees its own
-            client-minted chat_id round-trip). Falls back to
-            ``ConversationSession.id`` (UUID) for legacy rows that
-            predate the chat_id wiring (slot="0" in conversationKey).
+          * ``id`` carries through verbatim — Wasp uses a single id
+            namespace, so for marimo-created rows this IS the chat_id
+            marimo's frontend originally minted (round-trip). For
+            legacy/agent-driven rows it's a UUID, but the chat panel
+            still treats it as an opaque key.
           * ``title`` = the row's stored title (set by marimo's
             save_chat); falls back to agentName when null so the
             popover always shows something meaningful.
-          * ``createdAt`` / ``updatedAt`` both come from ``lastTurnAt``.
-          * ``agentSessionId`` maps to ``claudeSessionId`` - the SDK
+          * ``createdAt`` / ``updatedAt`` both come from ``lastTurnAt``;
+            converted from ISO 8601 to unix-ms for the frontend.
+          * ``agentSessionId`` maps to ``claudeSessionId`` — the SDK
             resume target the chat panel uses to continue this thread.
           * ``messageCount`` is ``turnCount``.
         """
@@ -228,9 +230,6 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
         stored_title = row.get("title")
         title = stored_title or agent_name or "(deleted agent)"
         last_turn = row.get("lastTurnAt") or ""
-        # Marimo's frontend expects unix-ms timestamps, but the Wasp
-        # endpoint returns ISO 8601 strings. Convert when possible;
-        # fall back to 0 so the popover's sort doesn't NaN-explode.
         ts_ms = 0
         if last_turn:
             try:
@@ -244,9 +243,8 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
                 )
             except (ValueError, TypeError):
                 ts_ms = 0
-        external_id = row.get("marimoChatId") or row.get("id")
         return {
-            "id": external_id,
+            "id": row.get("id"),
             "title": title,
             "createdAt": ts_ms,
             "updatedAt": ts_ms,
@@ -438,9 +436,8 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
                 )
             except (ValueError, TypeError):
                 ts_ms = 0
-        external_id = session.get("marimoChatId") or session.get("id") or chat_id
         return {
-            "id": external_id,
+            "id": session.get("id") or chat_id,
             "title": title,
             "createdAt": ts_ms,
             "updatedAt": ts_ms,

@@ -477,6 +477,18 @@ const ChatPanelBody = () => {
     setMessages,
   } = useChat({
     id: activeChatId,
+    // DATAGEN-FORK: mint chat ids as UUIDs (not nanoid-style short
+    // strings) so they match the single id namespace on the Wasp
+    // ConversationSession side. crypto.randomUUID is available in all
+    // modern browsers (Chrome 92+, Firefox 95+, Safari 15.4+) and Node
+    // 19+, which covers marimo's supported browser matrix. Falls back
+    // to the AI SDK default (nanoid) on ancient browsers — no breakage,
+    // just mixed format in those edge cases.
+    generateId: () =>
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) +
+          Math.random().toString(36).slice(2),
     sendAutomaticallyWhen: ({ messages }) => hasPendingToolCalls(messages),
     messages: activeChat?.messages || [], // initial messages
     transport: new DefaultChatTransport({
