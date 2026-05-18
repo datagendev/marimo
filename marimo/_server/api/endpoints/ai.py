@@ -249,6 +249,13 @@ async def ai_chat(
     }
     if session_path:
         _injected_headers["X-Marimo-Session-File"] = session_path
+    # DATAGEN-FORK: forward the AI panel's active chat_id (one per "+"
+    # click) so a reverse proxy can map distinct chats to distinct
+    # ConversationSession + claudeSessionId. Optional: when the frontend
+    # doesn't send it (older builds / non-chat-panel callers), the
+    # reverse proxy falls back to its single-thread slot.
+    if body.chat_id:
+        _injected_headers["X-Marimo-Chat-Id"] = body.chat_id
     _provider_cfg["extra_headers"] = {
         **_injected_headers,
         **(_provider_cfg.get("extra_headers") or {}),

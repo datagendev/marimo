@@ -72,3 +72,12 @@ class ChatRequest(msgspec.Struct, rename="camel"):
     tools: list[ToolDefinition] | None = None
     model: str | None = None
     variables: list[VariableContext | str] | None = None
+    # DATAGEN-FORK: the marimo AI panel's active chat_id (one per "+"
+    # click). Surfaced here so the chat endpoint can inject it into
+    # the outbound provider request's headers (X-Marimo-Chat-Id) — a
+    # reverse proxy (DataGen/Wasp) reads it to pick the right
+    # ConversationSession slot, so multiple chats per (workspace, user,
+    # notebookPath, agent) get distinct SDK sessions instead of all
+    # collapsing onto slot=0. Optional: when null the proxy falls back
+    # to its single-thread bucket.
+    chat_id: str | None = None

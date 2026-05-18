@@ -497,6 +497,13 @@ const ChatPanelBody = () => {
             tools,
             ...options,
             ...completionBody,
+            // DATAGEN-FORK: forward the active chat_id so the chat
+            // endpoint can inject X-Marimo-Chat-Id on the outbound
+            // provider request. Each "+" click in the AI panel mints
+            // a fresh chatId, which maps server-side to a fresh
+            // ConversationSession + fresh claudeSessionId. Null falls
+            // back to the proxy's single-thread bucket.
+            chatId: activeChatId ?? null,
           },
         };
       },

@@ -204,38 +204,185 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
         """Translate a ``ConversationSessionIndex`` (Wasp wire shape) to
         the marimo popover's chat-index entry shape.
 
-        Wasp shape: id, agentId, agentName, conversationKey,
-        claudeSessionId, notebookPath, rootExecutionId, lastTurnAt,
-        turnCount.
+        Wasp shape: id, marimoChatId, title, agentId, agentName,
+        conversationKey, claudeSessionId, notebookPath, rootExecutionId,
+        lastTurnAt, turnCount.
 
         Marimo shape: id, title, createdAt, updatedAt, agentSessionId,
         messageCount.
 
         Mapping choices:
-          * ``id`` carried through verbatim - ConversationSession.id is
-            stable, opaque, and globally unique.
-          * ``title`` derived from agent name; if the agent was deleted
-            we fall back to a short stub. Marimo's popover shows this
-            as the row label.
-          * ``createdAt`` / ``updatedAt`` both come from the Wasp row's
-            ``lastTurnAt``. We don't ship a separate createdAt today
-            (the popover only sorts on updatedAt). The frontend
-            tolerates equality.
-          * ``agentSessionId`` maps to ``claudeSessionId`` - they're
-            both "the SDK resume target" by another name.
+          * ``id`` = marimoChatId when present (so marimo sees its own
+            client-minted chat_id round-trip). Falls back to
+            ``ConversationSession.id`` (UUID) for legacy rows that
+            predate the chat_id wiring (slot="0" in conversationKey).
+          * ``title`` = the row's stored title (set by marimo's
+            save_chat); falls back to agentName when null so the
+            popover always shows something meaningful.
+          * ``createdAt`` / ``updatedAt`` both come from ``lastTurnAt``.
+          * ``agentSessionId`` maps to ``claudeSessionId`` - the SDK
+            resume target the chat panel uses to continue this thread.
           * ``messageCount`` is ``turnCount``.
         """
         agent_name = row.get("agentName") or ""
-        title = agent_name if agent_name else "(deleted agent)"
+        stored_title = row.get("title")
+        title = stored_title or agent_name or "(deleted agent)"
         last_turn = row.get("lastTurnAt") or ""
+        # Marimo's frontend expects unix-ms timestamps, but the Wasp
+        # endpoint returns ISO 8601 strings. Convert when possible;
+        # fall back to 0 so the popover's sort doesn't NaN-explode.
+        ts_ms = 0
+        if last_turn:
+            try:
+                from datetime import datetime
+
+                ts_ms = int(
+                    datetime.fromisoformat(
+                        last_turn.replace("Z", "+00:00")
+                    ).timestamp()
+                    * 1000
+                )
+            except (ValueError, TypeError):
+                ts_ms = 0
+        external_id = row.get("marimoChatId") or row.get("id")
         return {
-            "id": row.get("id"),
+            "id": external_id,
             "title": title,
-            "createdAt": last_turn,
-            "updatedAt": last_turn,
+            "createdAt": ts_ms,
+            "updatedAt": ts_ms,
             "agentSessionId": row.get("claudeSessionId"),
             "messageCount": row.get("turnCount") or 0,
         }
+
+    @staticmethod
+    def _events_to_ui_messages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Translate Claude SDK JSONL events to marimo's ``UIMessage[]``
+        (Vercel AI SDK shape).
+
+        SDK events to keep:
+          * ``{"type":"user","message":{role:"user",content:[...]}}`` →
+            one UIMessage with role="user" and parts mirrored from content.
+          * ``{"type":"assistant","message":{role:"assistant",content:[...],
+            id:"msg_..."}}`` → one UIMessage with role="assistant" and
+            parts including text + tool-call entries.
+          * ``{"type":"tool_result","tool_use_id":"tu_X","content":...}``
+            → attach the result onto the matching tool-call part of the
+            most recent assistant message (by tool_use id), upgrading
+            its state to ``"output-available"``.
+
+        Events to skip (marimo-fork wrappers + SDK internals not user-
+        visible): ``ai-title``, ``queue-operation``, ``last-prompt``,
+        ``attachment``, ``system`` / ``system/init``, any event without
+        a ``message`` field that we can flatten.
+
+        Content-item mapping:
+          * ``{"type":"text","text":"..."}``  → ``{"type":"text","text":...}``
+          * ``{"type":"tool_use","id":...,"name":...,"input":...}`` →
+            ``{"type":"tool-<name>","toolCallId":...,
+              "state":"input-available","input":...}``
+            (state upgrades to ``"output-available"`` if a tool_result
+            event lands for this id)
+          * other content shapes are best-effort emitted as text using
+            their JSON representation, so the chat panel renders SOMETHING
+            instead of dropping the part silently.
+
+        The output is a list of UIMessage dicts ready to drop into a
+        marimo Chat blob's ``messages`` array.
+        """
+        ui_messages: list[dict[str, Any]] = []
+        # Index from tool_use id → (message index in ui_messages, part
+        # index inside that message's parts). Used to upgrade a tool-call
+        # part's state when a matching tool_result event arrives.
+        tool_call_index: dict[str, tuple[int, int]] = {}
+
+        for ev in events:
+            t = ev.get("type")
+            if t == "user":
+                msg = ev.get("message") or {}
+                if msg.get("role") != "user":
+                    continue
+                parts = []
+                for c in msg.get("content") or []:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        parts.append({"type": "text", "text": c.get("text", "")})
+                    elif isinstance(c, str):
+                        parts.append({"type": "text", "text": c})
+                if not parts:
+                    continue
+                uuid = ev.get("uuid") or f"u_{len(ui_messages)}"
+                ui_messages.append(
+                    {"id": uuid, "role": "user", "parts": parts}
+                )
+            elif t == "assistant":
+                msg = ev.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                parts: list[dict[str, Any]] = []
+                for c in msg.get("content") or []:
+                    if not isinstance(c, dict):
+                        continue
+                    ctype = c.get("type")
+                    if ctype == "text":
+                        parts.append(
+                            {"type": "text", "text": c.get("text", "")}
+                        )
+                    elif ctype == "tool_use":
+                        tool_name = c.get("name", "tool")
+                        tool_id = c.get("id") or f"tu_{len(parts)}"
+                        parts.append(
+                            {
+                                "type": f"tool-{tool_name}",
+                                "toolCallId": tool_id,
+                                "state": "input-available",
+                                "input": c.get("input"),
+                            }
+                        )
+                        # Record for later result attachment.
+                        tool_call_index[tool_id] = (
+                            len(ui_messages),
+                            len(parts) - 1,
+                        )
+                    elif ctype == "thinking":
+                        # Map Claude's thinking blocks to reasoning parts
+                        # so they render with appropriate UX.
+                        parts.append(
+                            {"type": "reasoning", "text": c.get("thinking", "")}
+                        )
+                if not parts:
+                    continue
+                msg_id = msg.get("id") or ev.get("uuid") or f"a_{len(ui_messages)}"
+                ui_messages.append(
+                    {"id": msg_id, "role": "assistant", "parts": parts}
+                )
+            elif t == "tool_result":
+                tool_use_id = ev.get("tool_use_id") or (
+                    ev.get("message", {}) or {}
+                ).get("tool_use_id")
+                if not tool_use_id or tool_use_id not in tool_call_index:
+                    continue
+                msg_idx, part_idx = tool_call_index[tool_use_id]
+                part = ui_messages[msg_idx]["parts"][part_idx]
+                # Tool result `content` can be a string or a list of
+                # content blocks. Flatten to a string for the part's
+                # output; the chat panel can render either.
+                raw = ev.get("content") or (ev.get("message", {}) or {}).get(
+                    "content"
+                )
+                if isinstance(raw, list):
+                    out_text = "\n".join(
+                        c.get("text", "")
+                        for c in raw
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                else:
+                    out_text = str(raw) if raw is not None else ""
+                part["state"] = "output-available"
+                part["output"] = out_text
+            # Everything else (ai-title, queue-operation, last-prompt,
+            # attachment, system, ...) is filtered out: not user-visible
+            # content.
+
+        return ui_messages
 
     def load_index(self, notebook_path: str | None) -> dict[str, Any]:
         # Wasp accepts the absolute path and strips NOTEBOOKS_DIR
@@ -258,51 +405,89 @@ class HttpChatHistoryProvider(ChatHistoryProvider):
     def load_chat(
         self, notebook_path: str | None, chat_id: str
     ) -> dict[str, Any] | None:
-        """Fetch a single ConversationSession's transcript.
+        """Fetch a single ConversationSession's transcript and translate
+        its SDK JSONL events into marimo's UIMessage[] shape so the chat
+        panel can repaint when the user clicks a past popover row.
 
-        TODO(notebook-conversations): translate the Wasp
-        ``events: SDKEvent[]`` array (anthropic JSONL parsed) into
-        marimo's per-chat ``messages: [{role, content, ...}]`` shape.
-        Until that translator lands, return a minimal envelope so the
-        chat panel doesn't crash when a user clicks a past row - they
-        see the title + empty body. New turns still work because they
-        go through the proxy, which writes deltas directly into
-        ``NotebookAgentChatMessage`` and shows them live via streaming.
+        ``chat_id`` is whatever the popover surfaced as the row's id.
+        That's normally marimo's external ``marimoChatId``; for legacy
+        rows (slot=0) it's a ConversationSession UUID. The endpoint
+        accepts either.
         """
         result = self._request_json("GET", f"/{urllib.parse.quote(chat_id)}")
         if not isinstance(result, dict):
             return None
         session = result.get("session") or {}
+        events = result.get("events") or []
+        if not isinstance(events, list):
+            events = []
+        agent_name = session.get("agentName") or ""
+        stored_title = session.get("title")
+        title = stored_title or agent_name or ""
         last_turn = session.get("lastTurnAt") or ""
-        agent_session_id = session.get("claudeSessionId")
+        ts_ms = 0
+        if last_turn:
+            try:
+                from datetime import datetime
+
+                ts_ms = int(
+                    datetime.fromisoformat(
+                        last_turn.replace("Z", "+00:00")
+                    ).timestamp()
+                    * 1000
+                )
+            except (ValueError, TypeError):
+                ts_ms = 0
+        external_id = session.get("marimoChatId") or session.get("id") or chat_id
         return {
-            "id": session.get("id") or chat_id,
-            "title": session.get("agentName") or "",
-            "createdAt": last_turn,
-            "updatedAt": last_turn,
-            "agentSessionId": agent_session_id,
-            # TODO: replace with parseDeltasToEvents-equivalent that
-            # flattens anthropic-shape events into marimo's
-            # role/content message form.
-            "messages": [],
+            "id": external_id,
+            "title": title,
+            "createdAt": ts_ms,
+            "updatedAt": ts_ms,
+            "agentSessionId": session.get("claudeSessionId"),
+            "messages": self._events_to_ui_messages(events),
         }
 
     def save_chat(
         self, notebook_path: str | None, chat: dict[str, Any]
     ) -> str | None:
-        """No-op upsert.
+        """Persist marimo's chat blob: refresh the popover row's title.
 
-        Marimo POSTs the whole chat blob after every turn so the
-        on-disk store can re-serialize messages. In DataGen's model the
-        proxy's ``runChatTurn`` already persisted JSONL deltas before
-        the panel got its assistant response, so there's nothing new
-        for the popover to write. Returning ``None`` (which the
-        endpoint translates to a 204) keeps the panel happy.
+        Most of the work the file-backed provider does (storing full
+        message bytes) is already done by the proxy turn path: when the
+        AI panel POSTs ``/v1/messages`` with ``X-Marimo-Chat-Id``, the
+        proxy upserts the ConversationSession + appends the JSONL
+        delta. By the time ``save_chat`` is invoked, postgres already
+        has the SDK transcript.
 
-        We do NOT create new ConversationSession rows here. The "+" new-
-        chat path runs through ``POST /api/notebook/conversation-sessions``
-        directly; this method is only called for save-on-turn-complete.
+        What save_chat brings to the table: the popover ROW TITLE.
+        Marimo's frontend derives a title from the first user message
+        (or sometimes from an AI summary) and includes it in the Chat
+        blob. We POST it as a title-only update so the popover renders
+        the right label.
+
+        The POST is a no-op when ``chat["id"]`` doesn't reference an
+        existing row (e.g. the user clicked "+" but hasn't sent a
+        message yet — the proxy hasn't created the row). The endpoint
+        returns 400; we swallow the error and return None.
         """
+        chat_id = chat.get("id")
+        if not isinstance(chat_id, str) or not chat_id:
+            return None
+        title = chat.get("title")
+        if not isinstance(title, str):
+            return None
+        title_stripped = title.strip()
+        if not title_stripped:
+            return None
+        # marimoChatId-only update: server resolves the existing row by
+        # (workspace, user, marimoChatId) and refreshes title. No
+        # agentId required (already set on the existing row).
+        self._request_json(
+            "POST",
+            "",
+            body={"marimoChatId": chat_id, "title": title_stripped},
+        )
         return None
 
     def delete_chat(self, notebook_path: str | None, chat_id: str) -> bool:
