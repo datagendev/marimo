@@ -513,9 +513,17 @@ const ChatPanelBody = () => {
             // endpoint can inject X-Marimo-Chat-Id on the outbound
             // provider request. Each "+" click in the AI panel mints
             // a fresh chatId, which maps server-side to a fresh
-            // ConversationSession + fresh claudeSessionId. Null falls
-            // back to the proxy's single-thread bucket.
-            chatId: activeChatId ?? null,
+            // ConversationSession + fresh claudeSessionId.
+            //
+            // NB: use `chatId` (the id useChat is actually USING for
+            // this turn — either the activeChatId we passed in, or the
+            // UUID generateId minted when activeChatId was null) NOT
+            // `activeChatId` directly. After "+" → setActiveChat(null),
+            // activeChatId is null but `chatId` carries the newly-minted
+            // UUID. Sending activeChatId here would land null on the
+            // wire and the proxy would fall back to slot="0" — the
+            // exact "+ button does nothing" bug we're fixing.
+            chatId: chatId ?? null,
           },
         };
       },
