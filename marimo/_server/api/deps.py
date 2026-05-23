@@ -266,9 +266,45 @@ class AppState(AppStateBase):
                 len(sm.sessions),
             )
             return None
+
+        # DEDUP: if a Session already serves this file_key, register the
+        # incoming id as an ALIAS that points at the existing Session
+        # instead of creating a parallel one. This preserves the
+        # upstream "one Session per file" invariant that two other
+        # mechanisms rely on:
+        #
+        #   - ws_endpoint._can_connect uses
+        #     `manager.any_clients_connected(file_key)` to enforce
+        #     "only one frontend per file". Parallel sessions all
+        #     attach consumers for the same file_key, which makes
+        #     every new tab see MARIMO_ALREADY_CONNECTED forever.
+        #
+        #   - SkewProtectionToken does leader election per-Session.
+        #     Aliased ids share one Session and therefore one token,
+        #     so the "Take over session" button actually takes over
+        #     the only seat at the table.
+        #
+        # Aliasing = same Session object stored under multiple keys in
+        # sm.sessions. `get_session(id)` continues to return the same
+        # Session for any of those ids. No new kernel is spawned. No
+        # consumer is duplicated.
+        for existing_sid, existing_session in list(sm.sessions.items()):
+            existing_fm = getattr(existing_session, "app_file_manager", None)
+            existing_path = getattr(existing_fm, "path", None)
+            if existing_path == file_key and existing_sid != session_id:
+                LOGGER.info(
+                    "[deps] lazy-register: aliasing %s -> existing session %s "
+                    "for file_key=%s (preserves one-Session-per-file invariant)",
+                    session_id,
+                    existing_sid,
+                    file_key,
+                )
+                sm.sessions[session_id] = existing_session
+                return existing_session
+
         LOGGER.info(
             "[deps] lazy-registering session %s for file_key=%s "
-            "(frontend minted id without prior /api/sessions/open)",
+            "(no prior session — creating fresh)",
             session_id,
             file_key,
         )
