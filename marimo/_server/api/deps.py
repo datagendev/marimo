@@ -151,10 +151,44 @@ class AppState(AppStateBase):
         return self.session_manager.get_session(session_id)
 
     def require_current_session(self) -> Session:
-        """Get the current session or raise an error."""
+        """Get the current session or raise an error.
+
+        DATAGEN-FORK: when the inbound ``Marimo-Session-Id`` header is
+        valid in shape (``/^s_[\\da-z]{6}$/``) but not registered in the
+        session manager, lazy-register it against the kernel's unique
+        file_key instead of raising. This handles the realistic case
+        where the iframe loaded WITHOUT a ``?session_id=`` query param —
+        e.g. Wasp's server-side ``POST /api/sessions/open`` call to the
+        Modal tunnel URL failed or timed out, the row's
+        ``marimoSessionId`` is null, the iframe URL omits the param, and
+        the frontend's ``generateSessionId()`` mints a fresh cuid2 id
+        (``s_<6 chars from [a-z0-9]>``) that the server never saw.
+
+        Without this fallback, every AI chat call (``ai.py`` line 216,
+        325, 399, 544; ``deps.py`` is on the require_current_session
+        path) raises ``Invalid session id: s_xxxxxx`` and the panel is
+        permanently broken until the user reboots the kernel. With this
+        fallback, the kernel adopts the frontend's id on first reference
+        and the rest of the request proceeds normally — same outcome as
+        if ``/api/sessions/open`` had been called with that id, just
+        deferred to the moment of first use.
+
+        Safe-by-construction: only applies when ``file_router`` reports
+        exactly one file_key. The DataGen sandbox always boots marimo
+        against a single ``--port 2718 <notebookPath>`` argument, so
+        this is the normal case for us; the upstream multi-file home
+        page is intentionally NOT served here (it goes through
+        ``/api/sessions/open`` or the WS handshake) so this lazy path
+        never fires there.
+        """
         session_id = self.require_current_session_id()
         session = self.session_manager.get_session(session_id)
         if session is None:
+            # Attempt lazy-register before logging + raising. Local
+            # imports avoid any circular dep with sessions_open.py.
+            session = self._lazy_register_session(session_id)
+            if session is not None:
+                return session
             LOGGER.warning(
                 "Valid sessions ids: %s",
                 list(self.session_manager.sessions.keys()),
@@ -169,6 +203,53 @@ class AppState(AppStateBase):
             )
             raise ValueError(f"Invalid session id: {session_id}")
         return session
+
+    def _lazy_register_session(
+        self, session_id: SessionId
+    ) -> Session | None:
+        """DATAGEN-FORK: register a session under a frontend-minted id.
+
+        Returns the newly-created Session on success, or None when the
+        kernel doesn't have a unique file_key to bind against (in which
+        case the caller falls through to raise as before).
+        """
+        from marimo._server.api.endpoints.sessions_open import (
+            _HeadlessSessionConsumer,
+        )
+
+        sm = self.session_manager
+        try:
+            file_key = sm.file_router.get_unique_file_key()
+        except Exception:
+            LOGGER.exception(
+                "[deps] lazy-register: file_router.get_unique_file_key threw"
+            )
+            return None
+        if file_key is None:
+            # Multi-file kernel — can't infer which file the new
+            # session should serve. Fall back to the original error.
+            return None
+        LOGGER.info(
+            "[deps] lazy-registering session %s for file_key=%s "
+            "(frontend minted id without prior /api/sessions/open)",
+            session_id,
+            file_key,
+        )
+        consumer = _HeadlessSessionConsumer(consumer_id=str(session_id))
+        try:
+            return sm.create_session(
+                session_id=session_id,
+                session_consumer=consumer,
+                query_params={},
+                file_key=file_key,
+                auto_instantiate=True,
+            )
+        except Exception:
+            LOGGER.exception(
+                "[deps] lazy-register: create_session failed for %s",
+                session_id,
+            )
+            return None
 
     def require_query_params(self, param: str) -> str:
         """Get a query parameter or raise an error."""
