@@ -304,11 +304,33 @@ export function useChatPersistence(): void {
       for (const [id, chat] of v.chats) {
         const prev = lastPushedSnapshot.current.get(id);
         if (prev === chat) continue; // ref-equal: nothing to do
-        // Skip pure stubs (no messages and not loaded) so we don't
-        // round-trip a hydration back to disk as an "edit".
+        // Skip pure stubs (no messages, no title, not loaded) so we
+        // don't round-trip a hydration back to disk as an "edit".
+        //
+        // Why we ALSO check `!title` here:
+        // `createNewThread` mints a Chat with `title: generateChatTitle(initialMessage)`
+        // and `messages: []`, then calls `sendMessage` which kicks off
+        // the AI streaming loop. The atom's `chat.messages` only gets
+        // appended via `onFinish` — i.e., AFTER a successful streaming
+        // turn. If the user closes the tab mid-stream or the loop errors,
+        // `onFinish` never fires, the atom stays at `messages: []`,
+        // and this skip used to swallow the write — so the server-side
+        // `ConversationSession.title` stayed NULL even though the proxy
+        // turn had already created the row from the first user prompt.
+        //
+        // A real "pure stub" (server hydration that we want to suppress)
+        // has both empty messages AND no title for the row that has
+        // never been saved before; but in practice server hydration
+        // stubs are caught by the ref-equality check above because
+        // `useChatPersistence`'s hydration effect pre-claims
+        // `lastPushedSnapshot` with the exact stub reference BEFORE
+        // mutating the atom. So this second-line defense only fires
+        // for chats freshly minted by the user — and those should be
+        // pushed if they carry a title, so save_chat can persist it.
         if (
           !loadedFullBodies.current.has(id) &&
-          (chat.messages?.length ?? 0) === 0
+          (chat.messages?.length ?? 0) === 0 &&
+          (!chat.title || chat.title.length === 0)
         ) {
           continue;
         }
