@@ -218,16 +218,53 @@ class AppState(AppStateBase):
         )
 
         sm = self.session_manager
+
+        # Resolve file_key with three fallbacks, in order of trust:
+        #   (1) router.get_unique_file_key() — works when marimo was
+        #       launched against a single file path. Returns None for
+        #       LazyListOfFilesAppFileRouter (directory mode), which is
+        #       what DataGen actually uses (`marimo edit <dir>`).
+        #   (2) request's ?file= query param — every iframe request and
+        #       chat-history fetch carries this; it's the same value the
+        #       WebSocket handshake uses for FILE_QUERY_PARAM_KEY.
+        #   (3) any existing session's bound file — unambiguous only when
+        #       there's exactly one open file, which is our deployment
+        #       invariant (one notebook per sandbox). Lets a fresh probe
+        #       latch onto whatever the browser-side session already
+        #       registered.
+        file_key: str | None = None
         try:
             file_key = sm.file_router.get_unique_file_key()
         except Exception:
             LOGGER.exception(
                 "[deps] lazy-register: file_router.get_unique_file_key threw"
             )
-            return None
+
         if file_key is None:
-            # Multi-file kernel — can't infer which file the new
-            # session should serve. Fall back to the original error.
+            try:
+                file_key = self.request.query_params.get("file")
+            except Exception:
+                LOGGER.exception(
+                    "[deps] lazy-register: reading ?file= query param threw"
+                )
+
+        if file_key is None:
+            existing_paths = {
+                getattr(getattr(s, "app_file_manager", None), "path", None)
+                for s in sm.sessions.values()
+            }
+            existing_paths.discard(None)
+            if len(existing_paths) == 1:
+                file_key = next(iter(existing_paths))
+
+        if not file_key:
+            LOGGER.warning(
+                "[deps] lazy-register: no file_key resolvable for session %s "
+                "(router=%s, sessions=%d) — falling back to error",
+                session_id,
+                type(sm.file_router).__name__,
+                len(sm.sessions),
+            )
             return None
         LOGGER.info(
             "[deps] lazy-registering session %s for file_key=%s "
