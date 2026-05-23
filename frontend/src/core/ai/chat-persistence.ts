@@ -152,12 +152,16 @@ export function useChatPersistence(): void {
   const lastPushedActiveId = useRef<ChatId | null | undefined>(undefined);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const idx = await fetchIndex();
-      if (cancelled || !idx) return;
+    // Track in-flight retries so the unmount cleanup can stop a
+    // schedule-only loop without aborting a fetch that's already in
+    // flight (we still want that response to land in the atom).
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+
+    const applyIndex = (idx: IndexResponse | null) => {
+      if (!idx) return false;
       const indexChats = idx.chats ?? [];
-      if (indexChats.length === 0 && !idx.activeChatId) return;
+      if (indexChats.length === 0 && !idx.activeChatId) return true;
 
       // Echo-suppression: pre-claim every stub we're about to insert
       // into `lastPushedSnapshot` so the writeback subscriber treats
@@ -195,9 +199,44 @@ export function useChatPersistence(): void {
           activeChatId: prev.activeChatId ?? idx.activeChatId ?? null,
         };
       });
-    })();
+      return true;
+    };
+
+    // Why no `cancelled` guard around `applyIndex(idx)`:
+    // The chat panel re-mounts whenever marimo's runtime issues a
+    // session-id rotation (e.g. after a WebSocket reconnect — surfaces
+    // as the "Reconnected" pill in the AI panel). That cleanup used to
+    // set `cancelled = true` BEFORE the in-flight fetch returned, so
+    // the 50+ chats the server had already streamed back got thrown on
+    // the floor. The re-mount's fresh fetch then ran with the brand-new
+    // session id BEFORE the marimo server's session table had finished
+    // registering it — server returned 500 "Invalid session id" — and
+    // the atom never got hydrated. Net effect: popover showed only the
+    // single chat the user had just created locally via
+    // `createNewThread`.
+    //
+    // Fix: drop the cancellation. `chatStateAtom` is a jotai store
+    // singleton — `store.set` doesn't care whether the React component
+    // is still mounted. Writing the hydrated chats post-unmount is
+    // harmless (and useful for the next mount, which is what re-mount
+    // is anyway).
+    //
+    // Retry with exponential backoff to absorb the session-id race on
+    // reconnects (the second fetch lands AFTER the server has the new
+    // session id, so the 500 self-heals).
+    const tick = async () => {
+      attempt += 1;
+      const idx = await fetchIndex();
+      if (applyIndex(idx)) return;
+      if (attempt >= 4) return; // 0s, 0.5s, 1.5s, 3.5s — total ~5.5s
+      const delay = 500 * 2 ** (attempt - 1);
+      timerId = setTimeout(() => {
+        void tick();
+      }, delay);
+    };
+    void tick();
     return () => {
-      cancelled = true;
+      if (timerId !== undefined) clearTimeout(timerId);
     };
   }, [store]);
 
