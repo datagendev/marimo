@@ -44,6 +44,7 @@ from marimo._server.models.completion import (
     AiCompletionRequest,
     AiInlineCompletionRequest,
     ChatRequest,
+    UIMessage,
 )
 from marimo._server.models.models import (
     InvokeAiToolRequest,
@@ -68,6 +69,35 @@ LOGGER = _loggers.marimo_logger()
 
 # Router for file ai
 router = APIRouter()
+
+
+# DATAGEN-FORK: path markers for DataGen's resume-backed notebook proxy.
+# The canonical AI-panel wrapper is `<wasp>/api/notebook/anthropic`;
+# `/api/agents` is the documented rollback target. Both reconstruct the
+# full conversation server-side via `claude --resume` (the JSONL transcript
+# lives on the user's persistent volume), so the panel only needs to send
+# the current turn.
+_DATAGEN_RESUME_PROXY_MARKERS = ("/api/notebook/anthropic", "/api/agents")
+
+
+def _is_datagen_resume_proxy(base_url: str | None) -> bool:
+    """True when the configured Anthropic ``base_url`` is a DataGen proxy
+    that owns conversation history, so the client may drop prior turns."""
+    return bool(base_url) and any(
+        marker in base_url for marker in _DATAGEN_RESUME_PROXY_MARKERS
+    )
+
+
+def _current_turn_only(messages: list[UIMessage]) -> list[UIMessage]:
+    """The current turn only: the slice from the last user message to the
+    end. Completed prior turns are dropped; tool-call / tool-result parts
+    trailing the last user message stay attached so an in-flight tool loop
+    survives. Returns the list unchanged when it holds no user message."""
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return messages[i:]
+    return messages
 
 
 async def safe_stream_wrapper(
@@ -284,8 +314,19 @@ async def ai_chat(
         format_stream=True, text_only=False, accept=accept
     )
 
+    # DATAGEN-FORK: when pointed at DataGen's resume-backed proxy, the proxy
+    # supplies prior turns via `claude --resume`, so the panel's accumulated
+    # `message_history` is redundant — forwarding it grows the outbound
+    # `/v1/messages` body every turn. Send only the current turn and let the
+    # proxy reconstruct the rest. Off the proxy (e.g. a user's own Anthropic
+    # key on the default base_url) there is no server-side history, so the
+    # full list is preserved.
+    chat_messages = body.ui_messages
+    if _is_datagen_resume_proxy(_provider_cfg.get("base_url")):
+        chat_messages = _current_turn_only(chat_messages)
+
     return await provider.stream_completion(
-        messages=body.ui_messages,
+        messages=chat_messages,
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         additional_tools=additional_tools,

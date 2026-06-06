@@ -656,6 +656,44 @@ def _google_ai_config():
     }
 
 
+def _anthropic_datagen_proxy_config():
+    """Anthropic config whose base_url points at DataGen's resume-backed
+    notebook proxy."""
+    return {
+        "ai": {
+            "open_ai": {"model": "claude-3.5"},
+            "anthropic": {
+                "api_key": "fake-key",
+                "base_url": "https://tunnel.example/api/notebook/anthropic",
+            },
+            "models": {
+                "autocomplete_model": "anthropic/claude-3.5-for-inline-completion",
+            },
+        },
+    }
+
+
+def _multi_turn_messages() -> list[dict[str, Any]]:
+    """Two completed turns plus a new user turn."""
+    return [
+        {
+            "role": "user",
+            "content": "first question",
+            "parts": [{"type": "text", "text": "first question"}],
+        },
+        {
+            "role": "assistant",
+            "content": "first answer",
+            "parts": [{"type": "text", "text": "first answer"}],
+        },
+        {
+            "role": "user",
+            "content": "second question",
+            "parts": [{"type": "text", "text": "second question"}],
+        },
+    ]
+
+
 @pytest.mark.requires("openai", "pydantic_ai")
 @with_session(SESSION_ID)
 @patch("marimo._server.ai.providers.OpenAIProvider.stream_completion")
@@ -736,6 +774,121 @@ def test_chat_with_code(
         assert response.status_code == 200, response.text
         # Verify stream_completion was called
         mock_stream_completion.assert_called_once()
+
+
+@pytest.mark.requires("anthropic", "pydantic_ai")
+@with_session(SESSION_ID)
+@patch("marimo._server.ai.providers.AnthropicProvider.stream_completion")
+def test_chat_datagen_proxy_sends_only_current_turn(
+    client: TestClient, mock_stream_completion: Any
+) -> None:
+    """Pointed at the DataGen resume-backed proxy, the chat endpoint forwards
+    only the current turn — the proxy supplies prior turns via claude --resume."""
+    user_config_manager = get_session_config_manager(client)
+    from starlette.responses import StreamingResponse
+
+    async def mock_stream():
+        yield b"ok"
+
+    mock_stream_completion.return_value = StreamingResponse(
+        content=mock_stream(), media_type="text/event-stream"
+    )
+
+    multi_turn = _multi_turn_messages()
+    with patch.object(
+        user_config_manager,
+        "get_config",
+        return_value=_anthropic_datagen_proxy_config(),
+    ):
+        response = client.post(
+            "/api/ai/chat",
+            headers=HEADERS,
+            json={
+                "uiMessages": multi_turn,
+                "model": "anthropic/claude-3-5-sonnet-latest",
+                "variables": [],
+                "includeOtherCode": "",
+                "context": {},
+                "id": "123",
+            },
+        )
+        assert response.status_code == 200, response.text
+        mock_stream_completion.assert_called_once()
+        sent = mock_stream_completion.call_args.kwargs["messages"]
+        assert [m["role"] for m in sent] == ["user"]
+        assert sent[0]["content"] == "second question"
+
+
+@pytest.mark.requires("anthropic", "pydantic_ai")
+@with_session(SESSION_ID)
+@patch("marimo._server.ai.providers.AnthropicProvider.stream_completion")
+def test_chat_off_proxy_keeps_full_history(
+    client: TestClient, mock_stream_completion: Any
+) -> None:
+    """Off the DataGen proxy (no server-side resume), the full message history
+    is preserved so the model keeps conversation context."""
+    user_config_manager = get_session_config_manager(client)
+    from starlette.responses import StreamingResponse
+
+    async def mock_stream():
+        yield b"ok"
+
+    mock_stream_completion.return_value = StreamingResponse(
+        content=mock_stream(), media_type="text/event-stream"
+    )
+
+    multi_turn = _multi_turn_messages()
+    with patch.object(
+        user_config_manager, "get_config", return_value=_anthropic_config()
+    ):
+        response = client.post(
+            "/api/ai/chat",
+            headers=HEADERS,
+            json={
+                "uiMessages": multi_turn,
+                "model": "anthropic/claude-3-5-sonnet-latest",
+                "variables": [],
+                "includeOtherCode": "",
+                "context": {},
+                "id": "123",
+            },
+        )
+        assert response.status_code == 200, response.text
+        mock_stream_completion.assert_called_once()
+        sent = mock_stream_completion.call_args.kwargs["messages"]
+        assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+
+
+def test_datagen_resume_proxy_helpers() -> None:
+    from marimo._server.api.endpoints.ai import (
+        _current_turn_only,
+        _is_datagen_resume_proxy,
+    )
+
+    msgs = _multi_turn_messages()
+    # Completed prior turns dropped; only the trailing user turn remains.
+    assert _current_turn_only(msgs) == msgs[2:]
+
+    # Tool-call / tool-result parts trailing the last user message stay
+    # attached so an in-flight tool loop survives.
+    tool_turn = msgs[:2] + [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "tool-call"},
+        {"role": "tool", "content": "tool-result"},
+    ]
+    assert _current_turn_only(tool_turn) == tool_turn[2:]
+
+    # No user message → unchanged; empty → unchanged.
+    assert _current_turn_only([{"role": "assistant", "content": "x"}]) == [
+        {"role": "assistant", "content": "x"}
+    ]
+    assert _current_turn_only([]) == []
+
+    assert _is_datagen_resume_proxy("https://x/api/notebook/anthropic")
+    assert _is_datagen_resume_proxy("https://x/api/agents")
+    assert not _is_datagen_resume_proxy("https://api.anthropic.com")
+    assert not _is_datagen_resume_proxy("")
+    assert not _is_datagen_resume_proxy(None)
 
 
 @pytest.mark.parametrize(
