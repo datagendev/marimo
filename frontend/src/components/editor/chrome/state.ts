@@ -100,8 +100,13 @@ const storage = new ZodLocalStorage<ChromeState>(
 
 function initialState(): ChromeState {
   return {
-    selectedPanel: "variables", // initial panel
-    isSidebarOpen: false,
+    // DataGen fork: open the AI ("Chat with AI") panel by default so
+    // embedded notebook users can start chatting immediately. Each fresh
+    // notebook sandbox gets its own preview origin (empty localStorage),
+    // so this default applies on every first open. Upstream default is
+    // selectedPanel: "variables" with the sidebar closed.
+    selectedPanel: "ai", // initial panel
+    isSidebarOpen: true,
     isDeveloperPanelOpen: false,
     selectedDeveloperPanelTab: "errors",
   };
